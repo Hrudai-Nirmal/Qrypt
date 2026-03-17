@@ -1,0 +1,8 @@
+Flask>=3.0.0
+Flask-SocketIO>=5.4.0
+pymongo>=4.8.0
+qiskit>=1.2.0
+qiskit-aer>=0.15.0
+numpy>=2.0.0
+python-dotenv>=1.0.1
+redis>=5.1.0
