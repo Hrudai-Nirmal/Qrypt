@@ -4,7 +4,6 @@ import Dashboard from "./components/Dashboard";
 import Login from "./components/Login";
 import {
   acceptFriendRequest,
-  getFriendRequests,
   getChats,
   getMessages,
   login,
@@ -12,11 +11,10 @@ import {
   me,
   postMessage,
   register,
-  rotateQuantumKey,
-  searchFriends,
   searchUsers,
   sendFriendRequest,
   startChatSession,
+  updateProfile,
 } from "./lib/api";
 import { createQryptSocket } from "./lib/socket";
 import "./App.css";
@@ -31,7 +29,7 @@ function loadThemePreference() {
       return saved;
     }
   } catch {
-    // Ignore storage errors and fallback to light.
+    // Ignore storage errors and fallback to light mode.
   }
   return "light";
 }
@@ -54,7 +52,6 @@ function saveAuthToStorage(auth) {
 
   const serialized = JSON.stringify(auth);
   sessionStorage.setItem(AUTH_STORAGE_KEY, serialized);
-  // Clear legacy shared storage to avoid cross-tab account collisions.
   localStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
@@ -82,6 +79,52 @@ function mergeUniqueMessages(current, incoming) {
   );
 }
 
+function initials(name, username) {
+  const source = String(name || username || "?").trim();
+  if (!source) {
+    return "?";
+  }
+  const parts = source.split(/\s+/).slice(0, 2);
+  return parts.map((part) => part[0]?.toUpperCase() || "").join("") || "?";
+}
+
+function rankUsersByUsernamePriority(users, query) {
+  const value = String(query || "").trim().toLowerCase();
+  if (!value) {
+    return users;
+  }
+
+  function score(user) {
+    const username = String(user.username || "").toLowerCase();
+    const displayName = String(user.displayName || "").toLowerCase();
+
+    if (username === value) {
+      return 0;
+    }
+    if (username.startsWith(value)) {
+      return 1;
+    }
+    if (username.includes(value)) {
+      return 2;
+    }
+    if (displayName.startsWith(value)) {
+      return 3;
+    }
+    if (displayName.includes(value)) {
+      return 4;
+    }
+    return 5;
+  }
+
+  return [...users].sort((a, b) => {
+    const diff = score(a) - score(b);
+    if (diff !== 0) {
+      return diff;
+    }
+    return String(a.username || "").localeCompare(String(b.username || ""));
+  });
+}
+
 function App() {
   const [auth, setAuth] = useState(loadAuthFromStorage);
   const [theme, setTheme] = useState(loadThemePreference);
@@ -92,11 +135,17 @@ function App() {
   const [messagesByChat, setMessagesByChat] = useState({});
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
-  const [friendRequests, setFriendRequests] = useState({ incoming: [], outgoing: [] });
+  const [isSearchMode, setIsSearchMode] = useState(false);
   const [connectionState, setConnectionState] = useState("disconnected");
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileDraftName, setProfileDraftName] = useState("");
+  const [profileDraftImage, setProfileDraftImage] = useState(null);
+  const [profileRemoveImage, setProfileRemoveImage] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
 
   const socketRef = useRef(null);
   const messagesRef = useRef({});
+  const searchInputRef = useRef(null);
 
   const applyPresenceUpdate = useCallback((username, online, lastSeen) => {
     if (!username) {
@@ -147,7 +196,6 @@ function App() {
       setChats([]);
       setActiveChatId("");
       setMessagesByChat({});
-      setFriendRequests({ incoming: [], outgoing: [] });
       return;
     }
 
@@ -156,7 +204,6 @@ function App() {
     async function bootstrap() {
       try {
         const meData = await me(auth.token);
-
         if (cancelled) {
           return;
         }
@@ -169,25 +216,17 @@ function App() {
         setAuth(refreshed);
         saveAuthToStorage(refreshed);
 
-        const [chatsData, requestsData] = await Promise.all([
-          getChats(auth.token),
-          getFriendRequests(auth.token),
-        ]);
+        const chatsData = await getChats(auth.token);
         if (cancelled) {
           return;
         }
 
         const chatList = sortChats(chatsData.chats || []);
         setChats(chatList);
-        setFriendRequests({
-          incoming: requestsData.incoming || [],
-          outgoing: requestsData.outgoing || [],
-        });
         setActiveChatId((current) => current || chatList[0]?.chatId || "");
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(error.message);
-          // Only clear local auth when the backend confirms session is invalid.
           if (error.status === 401) {
             setAuth(null);
             saveAuthToStorage(null);
@@ -363,6 +402,37 @@ function App() {
     }
   }, [theme]);
 
+  useEffect(() => {
+    if (!auth?.token || !isSearchMode) {
+      return undefined;
+    }
+
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const data = await searchUsers(auth.token, query);
+        if (!cancelled) {
+          setSearchResults(rankUsersByUsernamePriority(data.users || [], query));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setErrorMessage(error.message);
+        }
+      }
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [auth?.token, isSearchMode, searchQuery]);
+
   async function handleLogin(payload) {
     setAuthBusy(true);
     setErrorMessage("");
@@ -403,7 +473,7 @@ function App() {
         await logout(token);
       }
     } catch {
-      // Ignore logout request errors and clear local session anyway.
+      // Ignore logout errors and clear local state anyway.
     }
 
     setAuth(null);
@@ -413,43 +483,9 @@ function App() {
     setActiveChatId("");
     setSearchQuery("");
     setSearchResults([]);
-    setFriendRequests({ incoming: [], outgoing: [] });
+    setIsSearchMode(false);
     setErrorMessage("");
-  }
-
-  async function handleSearchUsers() {
-    if (!auth?.token) {
-      return;
-    }
-
-    const query = searchQuery.trim();
-    if (!query) {
-      setSearchResults([]);
-      return;
-    }
-
-    try {
-      setErrorMessage("");
-      const data = await searchUsers(auth.token, query);
-      setSearchResults(data.users || []);
-    } catch (error) {
-      setErrorMessage(error.message);
-    }
-  }
-
-  async function handleSearchFriends() {
-    if (!auth?.token) {
-      return;
-    }
-
-    const query = searchQuery.trim();
-    try {
-      setErrorMessage("");
-      const data = await searchFriends(auth.token, query);
-      setSearchResults(data.users || []);
-    } catch (error) {
-      setErrorMessage(error.message);
-    }
+    setProfileModalOpen(false);
   }
 
   async function handleSendFriendRequest(username) {
@@ -467,12 +503,6 @@ function App() {
             : user,
         ),
       );
-
-      const requestsData = await getFriendRequests(auth.token);
-      setFriendRequests({
-        incoming: requestsData.incoming || [],
-        outgoing: requestsData.outgoing || [],
-      });
     } catch (error) {
       setErrorMessage(error.message);
     }
@@ -509,12 +539,6 @@ function App() {
         saveAuthToStorage(nextAuth);
         return nextAuth;
       });
-
-      const requestsData = await getFriendRequests(auth.token);
-      setFriendRequests({
-        incoming: requestsData.incoming || [],
-        outgoing: requestsData.outgoing || [],
-      });
     } catch (error) {
       setErrorMessage(error.message);
     }
@@ -530,6 +554,9 @@ function App() {
       const data = await startChatSession(auth.token, peerUsername);
       upsertChat(data.chat);
       setActiveChatId(data.chat.chatId);
+      setIsSearchMode(false);
+      setSearchQuery("");
+      setSearchResults([]);
     } catch (error) {
       setErrorMessage(error.message);
     }
@@ -559,65 +586,215 @@ function App() {
     }
   }
 
-  async function handleRotateKey(chatId) {
-    if (!auth?.token || !chatId) {
-      return;
-    }
-
-    try {
-      setErrorMessage("");
-      const data = await rotateQuantumKey(auth.token, chatId);
-      setChats((current) =>
-        current.map((chat) =>
-          chat.chatId === chatId
-            ? {
-                ...chat,
-                quantum: {
-                  ...chat.quantum,
-                  ...data.quantum,
-                  status: "ready",
-                },
-              }
-            : chat,
-        ),
-      );
-    } catch (error) {
-      setErrorMessage(error.message);
-    }
-  }
-
   function handleToggleTheme() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }
+
+  function handleToggleSearchMode() {
+    setIsSearchMode((current) => {
+      const next = !current;
+      if (next) {
+        setTimeout(() => searchInputRef.current?.focus(), 0);
+      } else {
+        setSearchQuery("");
+        setSearchResults([]);
+      }
+      return next;
+    });
+  }
+
+  function handleExitSearchMode() {
+    setIsSearchMode(false);
+    setSearchQuery("");
+    setSearchResults([]);
   }
 
   function handleOpenSettingsPlaceholder() {
     setErrorMessage("Settings page coming soon.");
   }
 
-  const appTools = (
-    <div className="app-tools">
-      <button
-        type="button"
-        className="theme-toggle"
-        onClick={handleToggleTheme}
-        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-        title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-      >
-        <span className="theme-toggle-track">
-          <span className="theme-toggle-thumb" />
-        </span>
-        <span className="theme-toggle-label">{theme === "dark" ? "Dark" : "Light"}</span>
-      </button>
-      <button type="button" className="ghost settings-button" onClick={handleOpenSettingsPlaceholder}>
-        Settings
-      </button>
-    </div>
+  function handleOpenProfileModal() {
+    if (!auth?.user) {
+      return;
+    }
+    setProfileDraftName(auth.user.displayName || auth.user.username);
+    setProfileDraftImage(auth.user.profilePicture || null);
+    setProfileRemoveImage(false);
+    setProfileModalOpen(true);
+    setErrorMessage("");
+  }
+
+  function handleCloseProfileModal() {
+    if (profileBusy) {
+      return;
+    }
+    setProfileModalOpen(false);
+  }
+
+  function handleProfileFileChange(event) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : null;
+      if (!result) {
+        setErrorMessage("Could not read selected image.");
+        return;
+      }
+      setProfileDraftImage(result);
+      setProfileRemoveImage(false);
+    };
+    reader.onerror = () => {
+      setErrorMessage("Could not read selected image.");
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function handleSaveProfile() {
+    if (!auth?.token) {
+      return;
+    }
+
+    setProfileBusy(true);
+    setErrorMessage("");
+
+    try {
+      const payload = {
+        displayName: profileDraftName.trim(),
+      };
+
+      if (profileRemoveImage) {
+        payload.removePicture = true;
+      } else {
+        payload.profilePicture = profileDraftImage || "";
+      }
+
+      const data = await updateProfile(auth.token, payload);
+      const nextAuth = {
+        token: auth.token,
+        user: data.user,
+      };
+      setAuth(nextAuth);
+      saveAuthToStorage(nextAuth);
+      setChats((current) =>
+        current.map((chat) =>
+          chat.peer.username === data.user.username
+            ? {
+                ...chat,
+                peer: {
+                  ...chat.peer,
+                  displayName: data.user.displayName,
+                  profilePicture: data.user.profilePicture,
+                },
+              }
+            : chat,
+        ),
+      );
+      setProfileModalOpen(false);
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+
+  function renderHeaderAvatar() {
+    const person = auth?.user;
+    if (person?.profilePicture) {
+      return (
+        <img
+          className="header-avatar"
+          src={person.profilePicture}
+          alt={`${person.displayName} profile`}
+        />
+      );
+    }
+
+    return (
+      <span className="header-avatar">{initials(person?.displayName, person?.username)}</span>
+    );
+  }
+
+  const header = (
+    <header className="app-header">
+      <div className="header-left">
+        <div className={`header-search ${isSearchMode ? "active" : ""}`}>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={handleToggleSearchMode}
+            aria-label={isSearchMode ? "Close search" : "Open search"}
+            title={isSearchMode ? "Close search" : "Search users"}
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="2" />
+              <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" strokeWidth="2" />
+            </svg>
+          </button>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search usernames"
+          />
+        </div>
+
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={handleToggleTheme}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+        >
+          <span className="theme-toggle-track">
+            <span className="theme-toggle-thumb" />
+          </span>
+          <span className="theme-toggle-label">{theme === "dark" ? "Dark" : "Light"}</span>
+        </button>
+      </div>
+
+      <div className="header-right">
+        {auth?.user && (
+          <button
+            type="button"
+            className="profile-button"
+            onClick={handleOpenProfileModal}
+            title="Profile"
+          >
+            {renderHeaderAvatar()}
+          </button>
+        )}
+
+        <button
+          type="button"
+          className="icon-button"
+          onClick={handleOpenSettingsPlaceholder}
+          aria-label="Open settings"
+          title="Settings"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" strokeWidth="2" />
+            <path
+              d="M19.4 14.1a7.8 7.8 0 0 0 0-4.2l2-1.5-1.9-3.2-2.4 1a8 8 0 0 0-3.6-2l-.4-2.5h-3.8l-.4 2.5a8 8 0 0 0-3.6 2l-2.4-1L.6 8.4l2 1.5a7.8 7.8 0 0 0 0 4.2l-2 1.5 1.9 3.2 2.4-1a8 8 0 0 0 3.6 2l.4 2.5h3.8l.4-2.5a8 8 0 0 0 3.6-2l2.4 1 1.9-3.2-2-1.5z"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </button>
+      </div>
+    </header>
   );
 
   if (!auth?.token || !auth?.user) {
     return (
       <>
-        {appTools}
+        {header}
         <Login
           onLogin={handleLogin}
           onRegister={handleRegister}
@@ -630,22 +807,19 @@ function App() {
 
   return (
     <>
-      {appTools}
+      {header}
+
       <main className="app-shell">
         <Dashboard
-          user={auth.user}
           chats={chats}
           activeChatId={activeChatId}
+          isSearchMode={isSearchMode}
           searchQuery={searchQuery}
-          onSearchQueryChange={setSearchQuery}
-          onSearch={handleSearchUsers}
-          onSearchFriends={handleSearchFriends}
           searchResults={searchResults}
-          friendRequests={friendRequests}
+          onExitSearchMode={handleExitSearchMode}
           onSendFriendRequest={handleSendFriendRequest}
           onAcceptFriendRequest={handleAcceptFriendRequest}
           onOpenChat={handleOpenChat}
-          onLogout={handleLogout}
         />
 
         <section className="chat-column">
@@ -657,10 +831,74 @@ function App() {
             messages={activeMessages}
             connectionState={connectionState}
             onSendMessage={handleSendMessage}
-            onRotateKey={handleRotateKey}
           />
         </section>
       </main>
+
+      {profileModalOpen && (
+        <div className="modal-backdrop" onClick={handleCloseProfileModal}>
+          <section className="profile-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>Edit profile</h3>
+
+            <div className="profile-preview-row">
+              {profileDraftImage ? (
+                <img className="profile-preview" src={profileDraftImage} alt="Profile preview" />
+              ) : (
+                <span className="profile-preview">
+                  {initials(profileDraftName, auth.user.username)}
+                </span>
+              )}
+
+              <div className="profile-actions">
+                <label className="ghost file-picker" htmlFor="profile-image-upload">
+                  Upload image
+                </label>
+                <input
+                  id="profile-image-upload"
+                  type="file"
+                  accept="image/*"
+                  onChange={handleProfileFileChange}
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setProfileDraftImage(null);
+                    setProfileRemoveImage(true);
+                  }}
+                >
+                  Remove photo
+                </button>
+              </div>
+            </div>
+
+            <label className="profile-label" htmlFor="profile-name-input">
+              Display name
+            </label>
+            <input
+              id="profile-name-input"
+              value={profileDraftName}
+              onChange={(event) => setProfileDraftName(event.target.value)}
+              maxLength={36}
+              placeholder="Your display name"
+            />
+
+            <div className="modal-footer">
+              <button type="button" className="ghost" onClick={handleLogout}>
+                Logout
+              </button>
+              <div className="modal-footer-right">
+                <button type="button" className="ghost" onClick={handleCloseProfileModal}>
+                  Cancel
+                </button>
+                <button type="button" className="primary" onClick={handleSaveProfile} disabled={profileBusy}>
+                  {profileBusy ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </>
   );
 }

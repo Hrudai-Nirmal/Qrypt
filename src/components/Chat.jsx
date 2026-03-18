@@ -6,7 +6,6 @@ function Chat({
   messages,
   connectionState,
   onSendMessage,
-  onRotateKey,
 }) {
   const [draft, setDraft] = useState("");
 
@@ -58,9 +57,6 @@ function Chat({
               ? `BB84 key: ${activeChat.quantum.preview}...`
               : "No quantum key"}
           </span>
-          <button type="button" onClick={() => onRotateKey(activeChat.chatId)}>
-            Regenerate key
-          </button>
         </div>
       </header>
 

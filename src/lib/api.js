@@ -96,6 +96,14 @@ export async function acceptFriendRequest(token, requesterUsername) {
   });
 }
 
+export async function updateProfile(token, payload) {
+  return request("/api/profile", {
+    method: "PUT",
+    headers: withAuth(token),
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getChats(token) {
   return request("/api/chats", {
     headers: withAuth(token),

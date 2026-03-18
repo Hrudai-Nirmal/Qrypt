@@ -98,6 +98,11 @@ RATE_LIMIT_PREFIX = "qrypt:rate"
 PRESENCE_PREFIX = "qrypt:presence"
 PRESENCE_TTL_SECONDS = int(os.getenv("PRESENCE_TTL_SECONDS", "120"))
 PRESENCE_DISCONNECT_GRACE_SECONDS = int(os.getenv("PRESENCE_DISCONNECT_GRACE_SECONDS", "10"))
+MAX_PROFILE_IMAGE_CHARS = 1_500_000
+PROFILE_IMAGE_PATTERN = re.compile(
+    r"^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=\s]+$",
+    re.IGNORECASE,
+)
 
 
 def create_redis_client():
@@ -319,6 +324,7 @@ def format_user(user_doc, current_user=None):
     return {
         "username": username,
         "displayName": user_doc.get("display_name", username),
+        "profilePicture": user_doc.get("profile_picture"),
         "isFriend": username in friends,
         "relationship": relationship,
         "presence": presence,
@@ -329,7 +335,7 @@ def format_chat(chat_doc, me_username: str):
     peer_username = [member for member in chat_doc["members"] if member != me_username][0]
     peer_doc = users_collection.find_one(
         {"username": peer_username},
-        {"username": 1, "display_name": 1},
+        {"username": 1, "display_name": 1, "profile_picture": 1},
     )
     presence = get_presence(peer_username)
 
@@ -345,6 +351,7 @@ def format_chat(chat_doc, me_username: str):
                 if peer_doc
                 else peer_username
             ),
+            "profilePicture": peer_doc.get("profile_picture") if peer_doc else None,
             "presence": presence,
         },
         "quantum": {
@@ -437,7 +444,7 @@ def require_auth(func):
 def user_profile_summary(username: str):
     user_doc = users_collection.find_one(
         {"username": username},
-        {"username": 1, "display_name": 1},
+        {"username": 1, "display_name": 1, "profile_picture": 1},
     )
     if not user_doc:
         return None
@@ -445,8 +452,30 @@ def user_profile_summary(username: str):
     return {
         "username": username,
         "displayName": user_doc.get("display_name", username),
+        "profilePicture": user_doc.get("profile_picture"),
         "presence": get_presence(username),
     }
+
+
+def search_priority(doc: dict, query: str):
+    username = str(doc.get("username", "")).lower()
+    display_name = str(doc.get("display_name", "")).lower()
+    value = query.lower()
+
+    if username == value:
+        bucket = 0
+    elif username.startswith(value):
+        bucket = 1
+    elif value in username:
+        bucket = 2
+    elif display_name.startswith(value):
+        bucket = 3
+    elif value in display_name:
+        bucket = 4
+    else:
+        bucket = 5
+
+    return (bucket, username, display_name)
 
 
 def ensure_chat_exists(user_a: str, user_b: str):
@@ -668,6 +697,7 @@ def register():
         {
             "username": username,
             "display_name": display_name,
+            "profile_picture": None,
             "password_hash": generate_password_hash(password),
             "friends": [],
             "friend_requests_incoming": [],
@@ -684,6 +714,7 @@ def register():
             "user": {
                 "username": username,
                 "displayName": display_name,
+                "profilePicture": None,
                 "friends": [],
                 "friendRequests": {"incoming": [], "outgoing": []},
             },
@@ -710,6 +741,7 @@ def login():
             "user": {
                 "username": user["username"],
                 "displayName": user.get("display_name", user["username"]),
+                "profilePicture": user.get("profile_picture"),
                 "friends": user.get("friends", []),
                 "friendRequests": {
                     "incoming": user.get("friend_requests_incoming", []),
@@ -730,10 +762,65 @@ def me():
             "user": {
                 "username": current_user["username"],
                 "displayName": current_user.get("display_name", current_user["username"]),
+                "profilePicture": current_user.get("profile_picture"),
                 "friends": current_user.get("friends", []),
                 "friendRequests": {
                     "incoming": current_user.get("friend_requests_incoming", []),
                     "outgoing": current_user.get("friend_requests_outgoing", []),
+                },
+            }
+        }
+    )
+
+
+@app.put("/api/profile")
+@require_auth
+@rate_limit(limit=20, window_seconds=60, scope="profile_update")
+def update_profile():
+    payload = request.get_json(silent=True) or {}
+    display_name = str(payload.get("displayName", "")).strip()
+    profile_picture = payload.get("profilePicture")
+    remove_picture = bool(payload.get("removePicture", False))
+
+    updates = {}
+
+    if display_name:
+        if len(display_name) > 36:
+            return json_error("Display name must be at most 36 characters")
+        updates["display_name"] = display_name
+
+    if remove_picture:
+        updates["profile_picture"] = None
+    elif profile_picture is not None:
+        profile_picture = str(profile_picture).strip()
+        if profile_picture and (
+            len(profile_picture) > MAX_PROFILE_IMAGE_CHARS
+            or not PROFILE_IMAGE_PATTERN.fullmatch(profile_picture)
+        ):
+            return json_error("Profile picture must be a valid base64 image data URL")
+        updates["profile_picture"] = profile_picture or None
+
+    if not updates:
+        return json_error("No profile changes provided")
+
+    users_collection.update_one(
+        {"username": request.current_user["username"]},
+        {"$set": updates},
+    )
+    refreshed = users_collection.find_one({"username": request.current_user["username"]})
+    if not refreshed:
+        return json_error("User not found", 404)
+
+    return jsonify(
+        {
+            "user": {
+                "username": refreshed["username"],
+                "displayName": refreshed.get("display_name", refreshed["username"]),
+                "profilePicture": refreshed.get("profile_picture"),
+                "friends": refreshed.get("friends", []),
+                "friendRequests": {
+                    "incoming": refreshed.get("friend_requests_incoming", []),
+                    "outgoing": refreshed.get("friend_requests_outgoing", []),
                 },
             }
         }
@@ -784,7 +871,8 @@ def search_users():
         return jsonify({"users": []})
 
     regex = re.compile(re.escape(query), re.IGNORECASE)
-    docs = users_collection.find(
+    docs = list(
+        users_collection.find(
         {
             "username": {"$ne": request.current_user["username"]},
             "$or": [
@@ -792,14 +880,16 @@ def search_users():
                 {"display_name": regex},
             ],
         },
-        {"username": 1, "display_name": 1, "friends": 1},
-    ).limit(12)
+        {"username": 1, "display_name": 1, "profile_picture": 1},
+    ).limit(40)
+    )
+    docs.sort(key=lambda doc: search_priority(doc, query))
 
     return jsonify(
         {
             "users": [
                 format_user(doc, current_user=request.current_user)
-                for doc in docs
+                for doc in docs[:12]
             ]
         }
     )
@@ -944,12 +1034,14 @@ def search_friends():
         regex = re.compile(re.escape(query), re.IGNORECASE)
         criteria["$or"] = [{"username": regex}, {"display_name": regex}]
 
-    docs = users_collection.find(
+    docs = list(users_collection.find(
         criteria,
-        {"username": 1, "display_name": 1},
-    ).limit(30)
+        {"username": 1, "display_name": 1, "profile_picture": 1},
+    ).limit(40))
+    if query:
+        docs.sort(key=lambda doc: search_priority(doc, query))
 
-    return jsonify({"users": [format_user(doc, request.current_user) for doc in docs]})
+    return jsonify({"users": [format_user(doc, request.current_user) for doc in docs[:30]]})
 
 
 @app.get("/api/chats")
