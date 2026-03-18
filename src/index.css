@@ -1,16 +1,16 @@
 @import url("https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap");
 
 :root {
-  --bg: #f4eeff;
-  --bg-soft: #dcd6f7;
-  --panel: #ece7ff;
-  --ink: #424874;
-  --ink-muted: #6c6f8f;
-  --line: #a6b1e1;
-  --accent: #6f7cc7;
-  --accent-strong: #424874;
-  --accent-ink: #f4eeff;
-  --warning: #8b6a3f;
+  --bg: #f9f7f7;
+  --bg-soft: #dbe2ef;
+  --panel: #ffffff;
+  --ink: #112d4e;
+  --ink-muted: #4a5f79;
+  --line: #3f72af;
+  --accent: #3f72af;
+  --accent-strong: #112d4e;
+  --accent-ink: #f9f7f7;
+  --warning: #8d4f2f;
   --radius-lg: 20px;
   --radius-md: 12px;
   --shadow: 0 16px 34px rgba(66, 72, 116, 0.18);
@@ -44,10 +44,7 @@ body[data-theme="dark"] {
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 12% 10%, color-mix(in srgb, var(--accent) 20%, transparent), transparent 42%),
-    radial-gradient(circle at 92% 3%, color-mix(in srgb, var(--line) 26%, transparent), transparent 44%),
-    linear-gradient(160deg, var(--bg) 15%, var(--bg-soft) 100%);
+  background: var(--bg);
   color: var(--ink);
   transition: background 220ms ease, color 220ms ease;
 }
