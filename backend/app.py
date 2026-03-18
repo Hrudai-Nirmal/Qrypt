@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import numpy as np
 from flask import Flask, jsonify, request
@@ -45,12 +46,34 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("FLASK_SECRET_KEY", "qrypt-dev-secret")
 
 cors_origin = os.getenv("CORS_ORIGIN", "*")
-allowed_origins = [o.strip() for o in cors_origin.split(",") if o.strip()]
+
+
+def normalize_origin(origin: str) -> str:
+    raw = (origin or "").strip()
+    if not raw:
+        return ""
+    if raw == "*":
+        return "*"
+
+    parsed = urlsplit(raw)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}".lower()
+    return raw.rstrip("/").lower()
+
+
+allowed_origins = [
+    normalized
+    for normalized in (
+        normalize_origin(value) for value in cors_origin.split(",")
+    )
+    if normalized
+]
+allowed_origin_set = set(allowed_origins)
 redis_url = os.getenv("REDIS_URL", "").strip()
 socketio_message_queue = os.getenv("SOCKETIO_MESSAGE_QUEUE", redis_url).strip()
 socketio = SocketIO(
     app,
-    cors_allowed_origins=allowed_origins if len(allowed_origins) > 1 else cors_origin,
+    cors_allowed_origins=allowed_origins if allowed_origins else "*",
     message_queue=socketio_message_queue or None,
     async_mode="threading",
 )
@@ -543,13 +566,13 @@ def handle_preflight():
 
 @app.after_request
 def attach_cors_headers(response):
-    request_origin = request.headers.get("Origin", "")
-    if cors_origin == "*":
+    request_origin = normalize_origin(request.headers.get("Origin", ""))
+    if "*" in allowed_origin_set:
         allow_origin = "*"
-    elif request_origin and request_origin in allowed_origins:
+    elif request_origin and request_origin in allowed_origin_set:
         allow_origin = request_origin
     else:
-        allow_origin = allowed_origins[0] if allowed_origins else cors_origin
+        allow_origin = allowed_origins[0] if allowed_origins else "*"
 
     response.headers["Access-Control-Allow-Origin"] = allow_origin
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
