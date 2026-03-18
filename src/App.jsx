@@ -3,7 +3,8 @@ import Chat from "./components/Chat";
 import Dashboard from "./components/Dashboard";
 import Login from "./components/Login";
 import {
-  addFriend,
+  acceptFriendRequest,
+  getFriendRequests,
   getChats,
   getMessages,
   login,
@@ -12,17 +13,32 @@ import {
   postMessage,
   register,
   rotateQuantumKey,
+  searchFriends,
   searchUsers,
+  sendFriendRequest,
   startChatSession,
 } from "./lib/api";
 import { createQryptSocket } from "./lib/socket";
 import "./App.css";
 
 const AUTH_STORAGE_KEY = "qrypt_auth";
+const THEME_STORAGE_KEY = "qrypt_theme";
+
+function loadThemePreference() {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "dark" || saved === "light") {
+      return saved;
+    }
+  } catch {
+    // Ignore storage errors and fallback to light.
+  }
+  return "light";
+}
 
 function loadAuthFromStorage() {
   try {
-    const raw = localStorage.getItem(AUTH_STORAGE_KEY);
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY) || localStorage.getItem(AUTH_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -31,11 +47,15 @@ function loadAuthFromStorage() {
 
 function saveAuthToStorage(auth) {
   if (!auth) {
+    sessionStorage.removeItem(AUTH_STORAGE_KEY);
     localStorage.removeItem(AUTH_STORAGE_KEY);
     return;
   }
 
-  localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(auth));
+  const serialized = JSON.stringify(auth);
+  sessionStorage.setItem(AUTH_STORAGE_KEY, serialized);
+  // Clear legacy shared storage to avoid cross-tab account collisions.
+  localStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
 function sortChats(chats) {
@@ -64,6 +84,7 @@ function mergeUniqueMessages(current, incoming) {
 
 function App() {
   const [auth, setAuth] = useState(loadAuthFromStorage);
+  const [theme, setTheme] = useState(loadThemePreference);
   const [authBusy, setAuthBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [chats, setChats] = useState([]);
@@ -71,6 +92,7 @@ function App() {
   const [messagesByChat, setMessagesByChat] = useState({});
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
+  const [friendRequests, setFriendRequests] = useState({ incoming: [], outgoing: [] });
   const [connectionState, setConnectionState] = useState("disconnected");
 
   const socketRef = useRef(null);
@@ -125,6 +147,7 @@ function App() {
       setChats([]);
       setActiveChatId("");
       setMessagesByChat({});
+      setFriendRequests({ incoming: [], outgoing: [] });
       return;
     }
 
@@ -146,13 +169,20 @@ function App() {
         setAuth(refreshed);
         saveAuthToStorage(refreshed);
 
-        const chatsData = await getChats(auth.token);
+        const [chatsData, requestsData] = await Promise.all([
+          getChats(auth.token),
+          getFriendRequests(auth.token),
+        ]);
         if (cancelled) {
           return;
         }
 
         const chatList = sortChats(chatsData.chats || []);
         setChats(chatList);
+        setFriendRequests({
+          incoming: requestsData.incoming || [],
+          outgoing: requestsData.outgoing || [],
+        });
         setActiveChatId((current) => current || chatList[0]?.chatId || "");
       } catch (error) {
         if (!cancelled) {
@@ -324,6 +354,15 @@ function App() {
 
   const activeMessages = activeChatId ? messagesByChat[activeChatId] || [] : [];
 
+  useEffect(() => {
+    document.body.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage write errors.
+    }
+  }, [theme]);
+
   async function handleLogin(payload) {
     setAuthBusy(true);
     setErrorMessage("");
@@ -374,6 +413,7 @@ function App() {
     setActiveChatId("");
     setSearchQuery("");
     setSearchResults([]);
+    setFriendRequests({ incoming: [], outgoing: [] });
     setErrorMessage("");
   }
 
@@ -397,19 +437,84 @@ function App() {
     }
   }
 
-  async function handleAddFriend(username) {
+  async function handleSearchFriends() {
+    if (!auth?.token) {
+      return;
+    }
+
+    const query = searchQuery.trim();
+    try {
+      setErrorMessage("");
+      const data = await searchFriends(auth.token, query);
+      setSearchResults(data.users || []);
+    } catch (error) {
+      setErrorMessage(error.message);
+    }
+  }
+
+  async function handleSendFriendRequest(username) {
     if (!auth?.token) {
       return;
     }
 
     try {
       setErrorMessage("");
-      await addFriend(auth.token, username);
+      await sendFriendRequest(auth.token, username);
       setSearchResults((current) =>
         current.map((user) =>
-          user.username === username ? { ...user, isFriend: true } : user,
+          user.username === username
+            ? { ...user, isFriend: false, relationship: "outgoing_pending" }
+            : user,
         ),
       );
+
+      const requestsData = await getFriendRequests(auth.token);
+      setFriendRequests({
+        incoming: requestsData.incoming || [],
+        outgoing: requestsData.outgoing || [],
+      });
+    } catch (error) {
+      setErrorMessage(error.message);
+    }
+  }
+
+  async function handleAcceptFriendRequest(username) {
+    if (!auth?.token) {
+      return;
+    }
+
+    try {
+      setErrorMessage("");
+      await acceptFriendRequest(auth.token, username);
+      setSearchResults((current) =>
+        current.map((user) =>
+          user.username === username
+            ? { ...user, isFriend: true, relationship: "friend" }
+            : user,
+        ),
+      );
+
+      setAuth((current) => {
+        if (!current?.user) {
+          return current;
+        }
+
+        const nextAuth = {
+          ...current,
+          user: {
+            ...current.user,
+            friends: Array.from(new Set([...(current.user.friends || []), username])),
+          },
+        };
+        saveAuthToStorage(nextAuth);
+        return nextAuth;
+      });
+
+      const requestsData = await getFriendRequests(auth.token);
+      setFriendRequests({
+        incoming: requestsData.incoming || [],
+        outgoing: requestsData.outgoing || [],
+      });
     } catch (error) {
       setErrorMessage(error.message);
     }
@@ -481,45 +586,82 @@ function App() {
     }
   }
 
+  function handleToggleTheme() {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  }
+
+  function handleOpenSettingsPlaceholder() {
+    setErrorMessage("Settings page coming soon.");
+  }
+
+  const appTools = (
+    <div className="app-tools">
+      <button
+        type="button"
+        className="theme-toggle"
+        onClick={handleToggleTheme}
+        aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+        title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+      >
+        <span className="theme-toggle-track">
+          <span className="theme-toggle-thumb" />
+        </span>
+        <span className="theme-toggle-label">{theme === "dark" ? "Dark" : "Light"}</span>
+      </button>
+      <button type="button" className="ghost settings-button" onClick={handleOpenSettingsPlaceholder}>
+        Settings
+      </button>
+    </div>
+  );
+
   if (!auth?.token || !auth?.user) {
     return (
-      <Login
-        onLogin={handleLogin}
-        onRegister={handleRegister}
-        loading={authBusy}
-        errorMessage={errorMessage}
-      />
+      <>
+        {appTools}
+        <Login
+          onLogin={handleLogin}
+          onRegister={handleRegister}
+          loading={authBusy}
+          errorMessage={errorMessage}
+        />
+      </>
     );
   }
 
   return (
-    <main className="app-shell">
-      <Dashboard
-        user={auth.user}
-        chats={chats}
-        activeChatId={activeChatId}
-        searchQuery={searchQuery}
-        onSearchQueryChange={setSearchQuery}
-        onSearch={handleSearchUsers}
-        searchResults={searchResults}
-        onAddFriend={handleAddFriend}
-        onOpenChat={handleOpenChat}
-        onLogout={handleLogout}
-      />
-
-      <section className="chat-column">
-        {errorMessage && <p className="error-banner">{errorMessage}</p>}
-
-        <Chat
-          activeChat={activeChat}
-          currentUser={auth.user}
-          messages={activeMessages}
-          connectionState={connectionState}
-          onSendMessage={handleSendMessage}
-          onRotateKey={handleRotateKey}
+    <>
+      {appTools}
+      <main className="app-shell">
+        <Dashboard
+          user={auth.user}
+          chats={chats}
+          activeChatId={activeChatId}
+          searchQuery={searchQuery}
+          onSearchQueryChange={setSearchQuery}
+          onSearch={handleSearchUsers}
+          onSearchFriends={handleSearchFriends}
+          searchResults={searchResults}
+          friendRequests={friendRequests}
+          onSendFriendRequest={handleSendFriendRequest}
+          onAcceptFriendRequest={handleAcceptFriendRequest}
+          onOpenChat={handleOpenChat}
+          onLogout={handleLogout}
         />
-      </section>
-    </main>
+
+        <section className="chat-column">
+          {errorMessage && <p className="error-banner">{errorMessage}</p>}
+
+          <Chat
+            activeChat={activeChat}
+            currentUser={auth.user}
+            messages={activeMessages}
+            connectionState={connectionState}
+            onSendMessage={handleSendMessage}
+            onRotateKey={handleRotateKey}
+          />
+        </section>
+      </main>
+    </>
   );
 }
 

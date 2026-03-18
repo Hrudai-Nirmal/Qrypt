@@ -23,6 +23,20 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+body[data-theme="dark"] {
+  --bg: #11171b;
+  --bg-soft: #1d2830;
+  --panel: #1f2a31;
+  --ink: #e8f0ec;
+  --ink-muted: #a8b7b1;
+  --line: #32444f;
+  --accent: #3dbf9b;
+  --accent-strong: #2f9f81;
+  --accent-ink: #06110d;
+  --warning: #e29a58;
+  --shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -34,6 +48,8 @@ body {
     radial-gradient(circle at 10% 10%, rgba(31, 138, 112, 0.18), transparent 45%),
     radial-gradient(circle at 90% 0%, rgba(185, 108, 46, 0.18), transparent 40%),
     linear-gradient(165deg, var(--bg) 20%, var(--bg-soft) 100%);
+  color: var(--ink);
+  transition: background 220ms ease, color 220ms ease;
 }
 
 h1,

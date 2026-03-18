@@ -1,3 +1,54 @@
+.app-tools {
+  position: fixed;
+  top: 18px;
+  right: 22px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-button {
+  background: var(--panel);
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  padding: 6px 10px;
+}
+
+.theme-toggle-track {
+  width: 42px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(31, 138, 112, 0.15);
+  position: relative;
+}
+
+.theme-toggle-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  transition: transform 180ms ease;
+}
+
+body[data-theme="dark"] .theme-toggle-thumb {
+  transform: translateX(20px);
+}
+
+.theme-toggle-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
 .app-shell {
   max-width: 1300px;
   margin: 0 auto;
@@ -147,7 +198,7 @@ button.ghost {
   padding: 18px;
   background: rgba(239, 230, 210, 0.5);
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto 1fr;
   gap: 14px;
 }
 
@@ -187,6 +238,11 @@ button.ghost {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 8px;
+}
+
+.search-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .search-results,
@@ -368,6 +424,11 @@ button.ghost {
 }
 
 @media (max-width: 1050px) {
+  .app-tools {
+    top: 10px;
+    right: 12px;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
   }

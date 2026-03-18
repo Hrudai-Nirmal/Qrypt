@@ -5,8 +5,11 @@ function Dashboard({
   searchQuery,
   onSearchQueryChange,
   onSearch,
+  onSearchFriends,
   searchResults,
-  onAddFriend,
+  friendRequests,
+  onSendFriendRequest,
+  onAcceptFriendRequest,
   onOpenChat,
   onLogout,
 }) {
@@ -52,9 +55,14 @@ function Dashboard({
             onChange={(event) => onSearchQueryChange(event.target.value)}
             placeholder="Search by username"
           />
-          <button type="button" onClick={onSearch}>
-            Search
-          </button>
+          <div className="search-actions">
+            <button type="button" onClick={onSearch}>
+              People
+            </button>
+            <button type="button" className="ghost" onClick={onSearchFriends}>
+              Friends
+            </button>
+          </div>
         </div>
 
         <div className="search-results">
@@ -76,12 +84,58 @@ function Dashboard({
                   >
                     Chat
                   </button>
+                  {person.relationship === "friend" ? (
+                    <button type="button" disabled>
+                      Friends
+                    </button>
+                  ) : person.relationship === "incoming_pending" ? (
+                    <button
+                      type="button"
+                      onClick={() => onAcceptFriendRequest(person.username)}
+                    >
+                      Accept
+                    </button>
+                  ) : person.relationship === "outgoing_pending" ? (
+                    <button type="button" disabled>
+                      Requested
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => onSendFriendRequest(person.username)}
+                    >
+                      Request
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <h3>Friend requests</h3>
+        </div>
+
+        <div className="search-results">
+          {(friendRequests?.incoming || []).length === 0 ? (
+            <p className="empty-hint">No pending requests.</p>
+          ) : (
+            friendRequests.incoming.map((person) => (
+              <div className="person-row" key={person.username}>
+                <div>
+                  <p className="person-name">{person.displayName}</p>
+                  <p className="muted">@{person.username}</p>
+                  {renderPresence(person)}
+                </div>
+                <div className="person-actions">
                   <button
                     type="button"
-                    onClick={() => onAddFriend(person.username)}
-                    disabled={person.isFriend}
+                    onClick={() => onAcceptFriendRequest(person.username)}
                   >
-                    {person.isFriend ? "Friends" : "Add"}
+                    Accept
                   </button>
                 </div>
               </div>

@@ -67,11 +67,32 @@ export async function searchUsers(token, query) {
   });
 }
 
-export async function addFriend(token, friendUsername) {
-  return request("/api/friends/add", {
+export async function searchFriends(token, query) {
+  const params = new URLSearchParams({ query });
+  return request(`/api/friends/search?${params.toString()}`, {
+    headers: withAuth(token),
+  });
+}
+
+export async function getFriendRequests(token) {
+  return request("/api/friends/requests", {
+    headers: withAuth(token),
+  });
+}
+
+export async function sendFriendRequest(token, friendUsername) {
+  return request("/api/friends/request", {
     method: "POST",
     headers: withAuth(token),
     body: JSON.stringify({ friendUsername }),
+  });
+}
+
+export async function acceptFriendRequest(token, requesterUsername) {
+  return request("/api/friends/accept", {
+    method: "POST",
+    headers: withAuth(token),
+    body: JSON.stringify({ requesterUsername }),
   });
 }
 

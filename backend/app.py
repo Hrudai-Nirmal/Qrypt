@@ -303,12 +303,24 @@ def build_chat_id(user_a: str, user_b: str) -> str:
 def format_user(user_doc, current_user=None):
     current_user = current_user or {}
     friends = set(current_user.get("friends", []))
+    outgoing = set(current_user.get("friend_requests_outgoing", []))
+    incoming = set(current_user.get("friend_requests_incoming", []))
+    username = user_doc["username"]
+    if username in friends:
+        relationship = "friend"
+    elif username in outgoing:
+        relationship = "outgoing_pending"
+    elif username in incoming:
+        relationship = "incoming_pending"
+    else:
+        relationship = "none"
     presence = get_presence(user_doc["username"])
 
     return {
-        "username": user_doc["username"],
-        "displayName": user_doc.get("display_name", user_doc["username"]),
-        "isFriend": user_doc["username"] in friends,
+        "username": username,
+        "displayName": user_doc.get("display_name", username),
+        "isFriend": username in friends,
+        "relationship": relationship,
         "presence": presence,
     }
 
@@ -373,6 +385,10 @@ def create_session(username: str):
 
 
 def get_session_user(token: str):
+    token = str(token or "").strip()
+    if not token:
+        return None
+
     session = sessions_collection.find_one({"token": token})
     if not session:
         return None
@@ -416,6 +432,21 @@ def require_auth(func):
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def user_profile_summary(username: str):
+    user_doc = users_collection.find_one(
+        {"username": username},
+        {"username": 1, "display_name": 1},
+    )
+    if not user_doc:
+        return None
+
+    return {
+        "username": username,
+        "displayName": user_doc.get("display_name", username),
+        "presence": get_presence(username),
+    }
 
 
 def ensure_chat_exists(user_a: str, user_b: str):
@@ -639,6 +670,8 @@ def register():
             "display_name": display_name,
             "password_hash": generate_password_hash(password),
             "friends": [],
+            "friend_requests_incoming": [],
+            "friend_requests_outgoing": [],
             "created_at": utc_now(),
         }
     )
@@ -652,6 +685,7 @@ def register():
                 "username": username,
                 "displayName": display_name,
                 "friends": [],
+                "friendRequests": {"incoming": [], "outgoing": []},
             },
         }
     )
@@ -677,6 +711,10 @@ def login():
                 "username": user["username"],
                 "displayName": user.get("display_name", user["username"]),
                 "friends": user.get("friends", []),
+                "friendRequests": {
+                    "incoming": user.get("friend_requests_incoming", []),
+                    "outgoing": user.get("friend_requests_outgoing", []),
+                },
             },
         }
     )
@@ -693,6 +731,10 @@ def me():
                 "username": current_user["username"],
                 "displayName": current_user.get("display_name", current_user["username"]),
                 "friends": current_user.get("friends", []),
+                "friendRequests": {
+                    "incoming": current_user.get("friend_requests_incoming", []),
+                    "outgoing": current_user.get("friend_requests_outgoing", []),
+                },
             }
         }
     )
@@ -767,6 +809,14 @@ def search_users():
 @require_auth
 @rate_limit(limit=30, window_seconds=60, scope="friends_add")
 def add_friend():
+    # Backward-compatible alias for legacy clients.
+    return send_friend_request()
+
+
+@app.post("/api/friends/request")
+@require_auth
+@rate_limit(limit=30, window_seconds=60, scope="friends_request")
+def send_friend_request():
     payload = request.get_json(silent=True) or {}
     friend_username = str(payload.get("friendUsername", "")).strip().lower()
 
@@ -779,23 +829,127 @@ def add_friend():
     if not friend:
         return json_error("User not found", 404)
 
+    current_friends = set(request.current_user.get("friends", []))
+    if friend_username in current_friends:
+        return json_error("Already friends", 409)
+
+    outgoing = set(request.current_user.get("friend_requests_outgoing", []))
+    incoming = set(request.current_user.get("friend_requests_incoming", []))
+
+    if friend_username in outgoing:
+        return jsonify({"ok": True, "status": "already_requested"})
+
+    if friend_username in incoming:
+        return jsonify({"ok": True, "status": "incoming_request_exists"})
+
     users_collection.update_one(
         {"username": current_username},
-        {"$addToSet": {"friends": friend_username}},
+        {"$addToSet": {"friend_requests_outgoing": friend_username}},
     )
     users_collection.update_one(
         {"username": friend_username},
-        {"$addToSet": {"friends": current_username}},
+        {"$addToSet": {"friend_requests_incoming": current_username}},
     )
 
     return jsonify(
         {
-            "friend": {
-                "username": friend_username,
-                "displayName": friend.get("display_name", friend_username),
-            }
+            "ok": True,
+            "status": "requested",
+            "friend": format_user(friend, request.current_user),
         }
     )
+
+
+@app.post("/api/friends/accept")
+@require_auth
+@rate_limit(limit=30, window_seconds=60, scope="friends_accept")
+def accept_friend_request():
+    payload = request.get_json(silent=True) or {}
+    requester_username = str(payload.get("requesterUsername", "")).strip().lower()
+    current_username = request.current_user["username"]
+
+    if requester_username == current_username:
+        return json_error("You cannot accept yourself")
+
+    requester = users_collection.find_one({"username": requester_username})
+    if not requester:
+        return json_error("User not found", 404)
+
+    incoming = set(request.current_user.get("friend_requests_incoming", []))
+    if requester_username not in incoming:
+        return json_error("No pending request from this user", 409)
+
+    users_collection.update_one(
+        {"username": current_username},
+        {
+            "$addToSet": {"friends": requester_username},
+            "$pull": {
+                "friend_requests_incoming": requester_username,
+                "friend_requests_outgoing": requester_username,
+            },
+        },
+    )
+    users_collection.update_one(
+        {"username": requester_username},
+        {
+            "$addToSet": {"friends": current_username},
+            "$pull": {
+                "friend_requests_incoming": current_username,
+                "friend_requests_outgoing": current_username,
+            },
+        },
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "status": "accepted",
+            "friend": {
+                "username": requester_username,
+                "displayName": requester.get("display_name", requester_username),
+            },
+        }
+    )
+
+
+@app.get("/api/friends/requests")
+@require_auth
+@rate_limit(limit=60, window_seconds=60, scope="friends_requests")
+def list_friend_requests():
+    incoming_usernames = list(dict.fromkeys(request.current_user.get("friend_requests_incoming", [])))
+    outgoing_usernames = list(dict.fromkeys(request.current_user.get("friend_requests_outgoing", [])))
+
+    incoming = [user_profile_summary(username) for username in incoming_usernames]
+    outgoing = [user_profile_summary(username) for username in outgoing_usernames]
+
+    return jsonify(
+        {
+            "incoming": [entry for entry in incoming if entry],
+            "outgoing": [entry for entry in outgoing if entry],
+        }
+    )
+
+
+@app.get("/api/friends/search")
+@require_auth
+@rate_limit(limit=60, window_seconds=60, scope="friends_search")
+def search_friends():
+    query = str(request.args.get("query", "")).strip().lower()
+    friends = list(dict.fromkeys(request.current_user.get("friends", [])))
+    if not friends:
+        return jsonify({"users": []})
+
+    criteria = {"username": {"$in": friends}}
+    if query:
+        regex = re.compile(re.escape(query), re.IGNORECASE)
+        criteria["$or"] = [{"username": regex}, {"display_name": regex}]
+
+    docs = users_collection.find(
+        criteria,
+        {"username": 1, "display_name": 1},
+    ).limit(30)
+
+    return jsonify({"users": [format_user(doc, request.current_user) for doc in docs]})
 
 
 @app.get("/api/chats")
