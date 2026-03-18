@@ -132,10 +132,7 @@ function App() {
 
     async function bootstrap() {
       try {
-        const [meData, chatsData] = await Promise.all([
-          me(auth.token),
-          getChats(auth.token),
-        ]);
+        const meData = await me(auth.token);
 
         if (cancelled) {
           return;
@@ -149,14 +146,22 @@ function App() {
         setAuth(refreshed);
         saveAuthToStorage(refreshed);
 
+        const chatsData = await getChats(auth.token);
+        if (cancelled) {
+          return;
+        }
+
         const chatList = sortChats(chatsData.chats || []);
         setChats(chatList);
         setActiveChatId((current) => current || chatList[0]?.chatId || "");
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(error.message);
-          setAuth(null);
-          saveAuthToStorage(null);
+          // Only clear local auth when the backend confirms session is invalid.
+          if (error.status === 401) {
+            setAuth(null);
+            saveAuthToStorage(null);
+          }
         }
       }
     }
