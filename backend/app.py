@@ -377,7 +377,16 @@ def get_session_user(token: str):
     if not session:
         return None
 
-    if session["expires_at"] < utc_now():
+    expires_at = session.get("expires_at")
+    if not expires_at:
+        sessions_collection.delete_one({"_id": session["_id"]})
+        return None
+
+    # PyMongo commonly returns naive UTC datetimes unless tz-aware options are set.
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at < utc_now():
         sessions_collection.delete_one({"_id": session["_id"]})
         return None
 
