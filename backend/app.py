@@ -999,11 +999,15 @@ def create_indexes():
     messages_collection.create_index([("chat_id", ASCENDING), ("sent_at", ASCENDING)])
 
 
+create_indexes()
+
+
 if __name__ == "__main__":
-    create_indexes()
+    # Render and other PaaS providers inject PORT; keep BACKEND_PORT for local overrides.
+    port = int(os.getenv("PORT", os.getenv("BACKEND_PORT", "5000")))
     socketio.run(
         app,
         host=os.getenv("BACKEND_HOST", "0.0.0.0"),
-        port=int(os.getenv("BACKEND_PORT", "5000")),
-        debug=os.getenv("FLASK_DEBUG", "true").lower() == "true",
+        port=port,
+        debug=os.getenv("FLASK_DEBUG", "false").lower() == "true",
     )
